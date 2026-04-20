@@ -10,7 +10,9 @@ A lightweight Node.js bot that monitors RSS feeds and posts new articles to [Blu
 ## Features
 
 - Monitors multiple RSS feeds on a configurable polling interval
-- Posts new articles with Open Graph metadata (title, description, thumbnail)
+- Posts new articles with rich embed cards (title, description, thumbnail)
+- Extracts thumbnail images from RSS media fields (`enclosure`, `media:thumbnail`, `media:content`) or, as a fallback, from `<img>` tags embedded in the feed's `content` HTML — so feeds that don't use dedicated media fields still get images
+- Falls back to Open Graph metadata (`og:image`, `og:title`, `og:description`) when the RSS item itself lacks the information
 - Tracks posted links locally to prevent duplicates
 - Persistent session management (logs in once, re-authenticates on expiry)
 - Respects Bluesky API rate limits with separate read/write tracking
@@ -104,7 +106,7 @@ All configuration constants are defined at the top of `bot.mjs`:
 |-----------------------------|------------|---------------------------------------------|
 | `POLL_INTERVAL_MS`          | `60000`    | Polling interval (1 min)                    |
 | `PUBLICATION_WINDOW_MS`     | `3600000`  | Only post articles newer than this (1 hour) |
-| `MAX_TRACKED_LINKS_PER_FEED`| `20`       | Duplicate tracking buffer per feed          |
+| `MAX_TRACKED_LINKS_PER_FEED`| `100`      | Duplicate tracking buffer per feed          |
 | `FETCH_TIMEOUT_MS`          | `15000`    | HTTP request timeout (15 sec)               |
 | `MAX_IMAGE_SIZE`            | `1000000`  | Max thumbnail size in bytes (1 MB)          |
 
@@ -113,6 +115,7 @@ All configuration constants are defined at the top of `bot.mjs`:
 ```
 Blueskybot/
 ├── bot.mjs              # Main application
+├── bot.test.mjs         # Unit tests (node:test, run with npm test)
 ├── feeds.txt            # Your RSS feeds (not tracked by git)
 ├── feeds.txt.example    # Feed configuration template
 ├── Dockerfile           # Container image (Alpine, non-root)
@@ -147,10 +150,11 @@ Blueskybot/
 1. **Poll** RSS feeds at a fixed interval
 2. **Filter** articles to those published within the last hour
 3. **Deduplicate** against locally stored posted links
-4. **Fetch** Open Graph metadata (title, description, image) from article URL
-5. **Upload** thumbnail image as blob to Bluesky
-6. **Post** to Bluesky with `app.bsky.embed.external` embed card
-7. **Persist** the posted link to avoid duplicates on restart
+4. **Extract image** from the RSS item: checks `enclosure`, `media:thumbnail`, and `media:content` in order, then falls back to the first `<img src>` found in `item.content` HTML
+5. **Fetch** Open Graph metadata (title, description, `og:image`) from the article URL when the RSS item itself is missing title, description, or image
+6. **Upload** thumbnail image as blob to Bluesky
+7. **Post** to Bluesky with `app.bsky.embed.external` embed card
+8. **Persist** the posted link to avoid duplicates on restart
 
 ## Troubleshooting
 
@@ -158,7 +162,7 @@ Blueskybot/
 |---------|----------|
 | `Invalid identifier or password` | Verify `.env` credentials. Use an [App Password](https://bsky.app/settings/app-passwords). |
 | `API rate limit reached` | The bot automatically waits and retries. No action needed. |
-| Thumbnails missing on some posts | The source site may lack `og:image` tags, or the image exceeds 1 MB. |
+| Thumbnails missing on some posts | The bot tries RSS media fields, content HTML `<img>` tags, and `og:image` in order. If all fail, the source site may have no accessible image or the image exceeds 1 MB. |
 | `FETCH_TIMEOUT` errors | The target site is slow or unreachable. The post will still be created without a thumbnail. |
 | Container unhealthy | Check logs with `docker compose logs` — likely a credential or network issue. |
 
