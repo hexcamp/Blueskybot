@@ -168,7 +168,7 @@ Blueskybot/
 
 ## Contributing
 
-Contributions are welcome! Please open an [issue](https://github.com/cgillinger/Blueskybot/issues) or submit a pull request.
+This is a personal project that I maintain on my own time, so I can't commit to reviewing issues or pull requests. That said, you're very welcome to fork the repository and adapt it to your needs — that's what open source is for.
 
 ## License
 
