@@ -5,6 +5,7 @@ import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import * as cheerio from 'cheerio';
+import { fileURLToPath } from 'url';
 
 // Load environment variables from .env file (for Bluesky credentials)
 dotenv.config();
@@ -255,8 +256,14 @@ function getImageUrlFromItem(item) {
       return mcUrl;
     }
   }
+  if (item.content) {
+    const match = item.content.match(/<img[^>]+src=["']([^"']+)["']/i);
+    if (match && isValidHttpUrl(match[1])) return match[1];
+  }
   return null;
 }
+
+export { getImageUrlFromItem };
 
 /**
  * Scrape OG metadata from a URL. Returns { title, description, imageUrl } or null on failure.
@@ -435,9 +442,10 @@ async function runLoop(feeds) {
   }
 }
 
-// Start the bot
-console.log('Bot starting up...');
-const feeds = await loadFeeds();
-console.log(`Loaded ${feeds.length} feed(s) from ${FEEDS_FILE}.`);
-lastPostedLinks = await loadLastPostedLinks();
-runLoop(feeds);
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  console.log('Bot starting up...');
+  const feeds = await loadFeeds();
+  console.log(`Loaded ${feeds.length} feed(s) from ${FEEDS_FILE}.`);
+  lastPostedLinks = await loadLastPostedLinks();
+  runLoop(feeds);
+}
