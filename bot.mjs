@@ -58,7 +58,14 @@ async function loadFeeds() {
 
 // Initialize Bluesky agent with service URL
 const agent = new BskyAgent({ service: 'https://bsky.social' });
-const parser = new RSSParser();
+const parser = new RSSParser({
+  customFields: {
+    item: [
+      ['media:content', 'mediaContent', { keepArray: true }],
+      ['media:thumbnail', 'mediaThumbnail', { keepArray: true }],
+    ],
+  },
+});
 
 // State
 let lastPostedLinks = {};
@@ -230,39 +237,92 @@ async function fetchFeedIfModified(feedUrl) {
 }
 
 /**
- * Fetch metadata for a link (title, description, and image) for embedding in posts.
- * Follows Bluesky's app.bsky.embed.external specification.
- * @param {string} url - The URL to fetch metadata for
- * @returns {object|null} Embed card object or null if fetching fails
+ * Extract the first image URL from an RSS item's media fields.
+ * Checks enclosure, mediaThumbnail, and mediaContent in order.
  */
-async function fetchEmbedCard(url) {
+function getImageUrlFromItem(item) {
+  if (item.enclosure?.url && item.enclosure.type?.startsWith('image/') && isValidHttpUrl(item.enclosure.url)) {
+    return item.enclosure.url;
+  }
+  const thumbUrl = item.mediaThumbnail?.[0]?.$.url;
+  if (thumbUrl && isValidHttpUrl(thumbUrl)) {
+    return thumbUrl;
+  }
+  const mc = item.mediaContent?.[0];
+  if (mc) {
+    const mcUrl = mc.$.url;
+    if (mcUrl && (mc.$.medium === 'image' || mc.$.type?.startsWith('image/')) && isValidHttpUrl(mcUrl)) {
+      return mcUrl;
+    }
+  }
+  return null;
+}
+
+/**
+ * Scrape OG metadata from a URL. Returns { title, description, imageUrl } or null on failure.
+ */
+async function fetchOgMetadata(url) {
+  try {
+    await rateLimit();
+    const response = await fetchWithTimeout(url);
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    const title = $('meta[property="og:title"]').attr('content') || '';
+    const description = $('meta[property="og:description"]').attr('content') || '';
+    const imageUrl = $('meta[property="og:image"]').attr('content') || null;
+
+    return { title, description, imageUrl: imageUrl && isValidHttpUrl(imageUrl) ? imageUrl : null };
+  } catch (error) {
+    console.error(`Failed to fetch OG metadata for ${url}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Build an embed card using RSS item metadata first, falling back to OG scrape.
+ * Follows Bluesky's app.bsky.embed.external specification.
+ */
+async function buildEmbedCard(item, url) {
   try {
     if (!isValidHttpUrl(url)) {
       console.error(`Skipping invalid URL: ${url}`);
       return null;
     }
 
-    await rateLimit();
-    const response = await fetchWithTimeout(url);
-    const html = await response.text();
-    const $ = cheerio.load(html);
+    let title = item.title || '';
+    let description = item.contentSnippet || item.summary || '';
+    let imageUrl = getImageUrlFromItem(item);
 
-    const ogTitle = $('meta[property="og:title"]').attr('content') || 'Link';
-    const ogDescription = $('meta[property="og:description"]').attr('content') || '';
-    const ogImage = $('meta[property="og:image"]').attr('content');
+    // Fetch OG metadata if RSS is missing title or description
+    let ogData = null;
+    if (!title || !description) {
+      ogData = await fetchOgMetadata(url);
+      if (ogData) {
+        title = title || ogData.title;
+        description = description || ogData.description;
+        imageUrl = imageUrl || ogData.imageUrl;
+      }
+    }
+
+    // If still no image, try OG just for image (avoid re-fetching if already done)
+    if (!imageUrl && !ogData) {
+      ogData = await fetchOgMetadata(url);
+      imageUrl = ogData?.imageUrl || null;
+    }
+
+    if (description.length > 300) {
+      description = description.slice(0, 297) + '...';
+    }
 
     const card = {
       $type: 'app.bsky.embed.external',
-      external: {
-        uri: url,
-        title: ogTitle,
-        description: ogDescription,
-      },
+      external: { uri: url, title: title || 'Link', description },
     };
 
-    if (ogImage && isValidHttpUrl(ogImage)) {
+    if (imageUrl) {
       try {
-        const imageResponse = await fetchWithTimeout(ogImage);
+        const imageResponse = await fetchWithTimeout(imageUrl);
         const contentType = imageResponse.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
         const imageData = Buffer.from(await imageResponse.arrayBuffer());
 
@@ -280,7 +340,7 @@ async function fetchEmbedCard(url) {
 
     return card;
   } catch (error) {
-    console.error(`Failed to fetch metadata for ${url}: ${error.message}`);
+    console.error(`Failed to build embed card for ${url}: ${error.message}`);
     return null;
   }
 }
@@ -311,7 +371,7 @@ async function processFeed(feed) {
     await saveLastPostedLinks();
 
     try {
-      const embedCard = await fetchEmbedCard(item.link);
+      const embedCard = await buildEmbedCard(item, item.link);
       await rateLimit(true);
 
       const postText = `${feedTitle ? `${feedTitle}: ` : ''}${item.title}\n\n${item.link}`;
