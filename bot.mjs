@@ -5,6 +5,7 @@ import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import * as cheerio from 'cheerio';
+import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 
 // Load environment variables from .env file (for Bluesky credentials)
@@ -16,6 +17,11 @@ const PUBLICATION_WINDOW_MS = 60 * 60 * 1000;    // 1 hour
 const MAX_TRACKED_LINKS_PER_FEED = 100;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_IMAGE_SIZE = 1_000_000;                 // 1 MB (Bluesky limit)
+
+const ALT_TEXT_ENABLED = process.env.ALT_TEXT_ENABLED === 'true';
+const ALT_TEXT_LANGUAGE = process.env.ALT_TEXT_LANGUAGE || 'en';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const ALT_IMAGE_MAX_DIMENSION = 512;
 
 // Rate limit configuration based on Bluesky's API documentation
 const RATE_LIMIT_API_WINDOW_MS = 5 * 60 * 1000;  // 5 minutes
@@ -263,7 +269,7 @@ function getImageUrlFromItem(item) {
   return null;
 }
 
-export { getImageUrlFromItem };
+export { getImageUrlFromItem, resizeImageForAltText, generateAltText };
 
 /**
  * Scrape OG metadata from a URL. Returns { title, description, imageUrl } or null on failure.
@@ -287,8 +293,87 @@ async function fetchOgMetadata(url) {
 }
 
 /**
- * Build an embed card using RSS item metadata first, falling back to OG scrape.
- * Follows Bluesky's app.bsky.embed.external specification.
+ * Resize an image so its longest side is ≤ maxDim and convert to JPEG.
+ * The result is used only for the Gemini API call; the original is uploaded to Bluesky.
+ * @returns {{ buffer: Buffer, mimeType: string }}
+ */
+async function resizeImageForAltText(imageBuffer, maxDim = ALT_IMAGE_MAX_DIMENSION) {
+  try {
+    const resized = await sharp(imageBuffer)
+      .resize(maxDim, maxDim, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+    return { buffer: resized, mimeType: 'image/jpeg' };
+  } catch (err) {
+    console.warn(`Image resize for alt text failed: ${err.message}`);
+    return { buffer: imageBuffer, mimeType: 'image/jpeg' };
+  }
+}
+
+/**
+ * Ask Gemini 2.5 Flash to describe an image for visually impaired users.
+ * Returns a trimmed string ≤ 300 chars, or '' on any error (graceful degradation).
+ * Retries up to 3 times with exponential backoff on HTTP 429.
+ *
+ * @param {Buffer} imageBuffer
+ * @param {string} mimeType
+ * @param {Function} [fetchFn] - injectable for testing (defaults to fetchWithTimeout)
+ * @param {number} [retryDelayMs] - base retry delay in ms; override in tests for speed
+ */
+async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithTimeout, retryDelayMs = 1000) {
+  const base64Data = imageBuffer.toString('base64');
+  const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe only what is visible.`;
+  const requestBody = {
+    contents: [{
+      parts: [
+        { inlineData: { mimeType, data: base64Data } },
+        { text: prompt },
+      ],
+    }],
+  };
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetchFn(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (response.status === 429) {
+        const delayMs = Math.pow(2, attempt + 1) * retryDelayMs;
+        console.warn(`Gemini rate limit (429). Retry ${attempt + 1}/3 in ${delayMs / 1000}s.`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue;
+      }
+
+      if (!response.ok) {
+        console.warn(`Gemini returned HTTP ${response.status}. Skipping alt text.`);
+        return '';
+      }
+
+      const data = await response.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) {
+        console.warn('Gemini returned no usable text. Skipping alt text.');
+        return '';
+      }
+      return text.trim().slice(0, 300);
+    } catch (err) {
+      console.warn(`Gemini alt text error: ${err.message}`);
+      return '';
+    }
+  }
+
+  console.warn('Gemini rate limit persisted after 3 retries. Skipping alt text.');
+  return '';
+}
+
+/**
+ * Build the embed for a post.
+ * When ALT_TEXT_ENABLED and the item has an image: returns app.bsky.embed.images with AI alt text.
+ * Otherwise: returns app.bsky.embed.external (link card with optional thumbnail).
  */
 async function buildEmbedCard(item, url) {
   try {
@@ -322,6 +407,49 @@ async function buildEmbedCard(item, url) {
       description = description.slice(0, 297) + '...';
     }
 
+    // --- Images embed with Gemini alt text ---
+    if (ALT_TEXT_ENABLED && imageUrl) {
+      try {
+        const imageResponse = await fetchWithTimeout(imageUrl);
+        const contentType = imageResponse.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
+        const imageData = Buffer.from(await imageResponse.arrayBuffer());
+
+        if (imageData.length > MAX_IMAGE_SIZE) {
+          console.log(`Image too large (${imageData.length} bytes), falling back to embed.external without thumbnail.`);
+        } else {
+          let aspectRatio;
+          try {
+            const meta = await sharp(imageData).metadata();
+            if (meta.width && meta.height) aspectRatio = { width: meta.width, height: meta.height };
+          } catch (metaErr) {
+            console.warn(`Could not read image dimensions: ${metaErr.message}`);
+          }
+
+          const { buffer: resizedBuffer, mimeType: resizedMime } = await resizeImageForAltText(imageData);
+          const altText = await generateAltText(resizedBuffer, resizedMime);
+
+          await rateLimit(true);
+          const { data: { blob } } = await agent.uploadBlob(imageData, contentType);
+
+          const imageEntry = { alt: altText, image: blob };
+          if (aspectRatio) imageEntry.aspectRatio = aspectRatio;
+
+          return {
+            $type: 'app.bsky.embed.images',
+            images: [imageEntry],
+          };
+        }
+      } catch (imgError) {
+        console.error(`Failed to build images embed: ${imgError.message}`);
+      }
+      // Alt-text path failed — return link card without thumbnail so the post still goes through
+      return {
+        $type: 'app.bsky.embed.external',
+        external: { uri: url, title: title || 'Link', description },
+      };
+    }
+
+    // --- Standard external link card ---
     const card = {
       $type: 'app.bsky.embed.external',
       external: { uri: url, title: title || 'Link', description },
@@ -385,7 +513,7 @@ async function processFeed(feed) {
       await agent.post({
         text: postText,
         embed: embedCard || undefined,
-        langs: ['en'],
+        langs: [ALT_TEXT_LANGUAGE],
       });
 
       console.log(`Posted: ${postText}`);
@@ -444,6 +572,10 @@ async function runLoop(feeds) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   console.log('Bot starting up...');
+  if (ALT_TEXT_ENABLED && !GEMINI_API_KEY) {
+    console.error('ALT_TEXT_ENABLED=true but GEMINI_API_KEY is not set. Add it to .env and restart.');
+    process.exit(1);
+  }
   const feeds = await loadFeeds();
   console.log(`Loaded ${feeds.length} feed(s) from ${FEEDS_FILE}.`);
   lastPostedLinks = await loadLastPostedLinks();

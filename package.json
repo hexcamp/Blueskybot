@@ -22,7 +22,8 @@
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.5",
     "node-fetch": "^3.3.2",
-    "rss-parser": "^3.13.0"
+    "rss-parser": "^3.13.0",
+    "sharp": "^0.33.0"
   },
   "repository": {
     "type": "git",
