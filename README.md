@@ -122,7 +122,9 @@ Environment variables (set in `.env`):
 | `ALT_TEXT_LANGUAGE` | `en`     | BCP-47 language code for alt-text (e.g. `sv`, `fi`) |
 | `GEMINI_API_KEY`    | —        | Required when `ALT_TEXT_ENABLED=true`                |
 
-### Alt-text for images (optional)
+### Alt-text for images (optional, untested)
+
+> **Note:** This feature has not been tested in a live environment yet. It may require adjustments before working reliably in production. Feedback welcome.
 
 The bot can automatically generate image descriptions using Google's Gemini AI, making posts more accessible for visually impaired users. When enabled, posts with images use `app.bsky.embed.images` with AI-written alt-text instead of plain link preview cards. The article URL is always included in the post text, so readers can still open the article.
 
