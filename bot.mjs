@@ -1,6 +1,5 @@
 // Import necessary modules
 import { BskyAgent } from '@atproto/api';
-import RSSParser from 'rss-parser';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
@@ -33,11 +32,59 @@ const FEEDS_FILE = 'feeds.txt';
 const LAST_POSTED_LINKS_FILE = 'lastPostedLinks.json';
 
 /**
- * Load RSS feeds from feeds.txt.
- * Format: one feed per line, optional title after " | ".
+ * Fetch with timeout to prevent hanging requests.
+ */
+export function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timeout));
+}
+
+/**
+ * Validate URL scheme to prevent SSRF (only allow http/https).
+ */
+export function isValidHttpUrl(urlString) {
+  try {
+    const url = new URL(urlString);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+// Provider registry — map prefix to async fetcher. Each fetcher must return
+// an array of NormalizedItem (or null for "unchanged"). See providers/_template.mjs.
+import rssFetcher from './providers/rss.mjs';
+import srApiFetcher from './providers/sr-api.mjs';
+
+const providers = {
+  'rss': rssFetcher,
+  'sr-api': srApiFetcher,
+};
+
+/**
+ * Parse one feeds.txt line into a feed config.
+ * - "proto://id | Title"  → { type: 'proto', id, title }       (when proto is not http/https)
+ * - "https://url | Title" → { type: 'rss', url, title }
+ */
+export function parseFeedLine(line) {
+  const [rawSource, rawTitle] = line.split('|').map(part => part.trim());
+  const title = rawTitle || null;
+  const prefixMatch = rawSource.match(/^([a-z][-a-z]*):\/\/(.+)$/);
+
+  if (prefixMatch && prefixMatch[1] !== 'http' && prefixMatch[1] !== 'https') {
+    return { type: prefixMatch[1], id: prefixMatch[2], title };
+  }
+  return { type: 'rss', url: rawSource, title };
+}
+
+/**
+ * Load feeds from feeds.txt.
+ * Format: one entry per line, optional title after " | ".
  * Lines starting with # and empty lines are ignored.
  */
-async function loadFeeds() {
+export async function loadFeeds() {
   let content;
   try {
     content = await fs.readFile(FEEDS_FILE, 'utf-8');
@@ -50,13 +97,10 @@ async function loadFeeds() {
     .split('\n')
     .map(line => line.trim())
     .filter(line => line && !line.startsWith('#'))
-    .map(line => {
-      const [url, title] = line.split('|').map(part => part.trim());
-      return { url, title: title || null };
-    });
+    .map(parseFeedLine);
 
   if (feeds.length === 0) {
-    console.error(`No feeds found in ${FEEDS_FILE}. Add at least one RSS feed URL.`);
+    console.error(`No feeds found in ${FEEDS_FILE}. Add at least one feed.`);
     process.exit(1);
   }
 
@@ -65,14 +109,6 @@ async function loadFeeds() {
 
 // Initialize Bluesky agent with service URL
 const agent = new BskyAgent({ service: 'https://bsky.social' });
-const parser = new RSSParser({
-  customFields: {
-    item: [
-      ['media:content', 'mediaContent', { keepArray: true }],
-      ['media:thumbnail', 'mediaThumbnail', { keepArray: true }],
-    ],
-  },
-});
 
 // State
 let lastPostedLinks = {};
@@ -82,30 +118,8 @@ let lastApiReset = Date.now();
 let lastCreateReset = Date.now();
 let isLoggedIn = false;
 
-// Cache for conditional RSS requests (ETag / Last-Modified per feed URL)
+// Cache for conditional HTTP requests (ETag / Last-Modified per feed URL)
 const feedHttpCache = new Map();
-
-/**
- * Fetch with timeout to prevent hanging requests.
- */
-function fetchWithTimeout(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  return fetch(url, { ...options, signal: controller.signal })
-    .finally(() => clearTimeout(timeout));
-}
-
-/**
- * Validate URL scheme to prevent SSRF (only allow http/https).
- */
-function isValidHttpUrl(urlString) {
-  try {
-    const url = new URL(urlString);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
 
 // Load last posted entries from file if it exists
 async function loadLastPostedLinks() {
@@ -160,7 +174,7 @@ async function rateLimit(isCreate = false) {
 }
 
 /**
- * Check if an RSS entry was published within the publication window.
+ * Check if an item was published within the publication window.
  */
 function isPublishedWithinWindow(pubDate) {
   return new Date(pubDate).getTime() >= Date.now() - PUBLICATION_WINDOW_MS;
@@ -170,32 +184,32 @@ function isPublishedWithinWindow(pubDate) {
  * Check if a link has already been posted (across ALL feeds).
  * Different feeds can contain the same article, so we check globally.
  */
-function isAlreadyPosted(feedUrl, link) {
+function isAlreadyPosted(_feedKey, link) {
   return Object.values(lastPostedLinks).some(links => links.includes(link));
 }
 
 /**
  * Record a link as posted.
  */
-function recordPostedLink(feedUrl, link) {
-  if (!lastPostedLinks[feedUrl]) {
-    lastPostedLinks[feedUrl] = [];
+function recordPostedLink(feedKey, link) {
+  if (!lastPostedLinks[feedKey]) {
+    lastPostedLinks[feedKey] = [];
   }
-  if (!lastPostedLinks[feedUrl].includes(link)) {
-    lastPostedLinks[feedUrl].push(link);
+  if (!lastPostedLinks[feedKey].includes(link)) {
+    lastPostedLinks[feedKey].push(link);
   }
-  if (lastPostedLinks[feedUrl].length > MAX_TRACKED_LINKS_PER_FEED) {
-    lastPostedLinks[feedUrl].shift();
+  if (lastPostedLinks[feedKey].length > MAX_TRACKED_LINKS_PER_FEED) {
+    lastPostedLinks[feedKey].shift();
   }
 }
 
 /**
  * Remove a link from the posted list (rollback on failed post).
  */
-function unrecordPostedLink(feedUrl, link) {
-  if (!lastPostedLinks[feedUrl]) return;
-  const idx = lastPostedLinks[feedUrl].indexOf(link);
-  if (idx !== -1) lastPostedLinks[feedUrl].splice(idx, 1);
+function unrecordPostedLink(feedKey, link) {
+  if (!lastPostedLinks[feedKey]) return;
+  const idx = lastPostedLinks[feedKey].indexOf(link);
+  if (idx !== -1) lastPostedLinks[feedKey].splice(idx, 1);
 }
 
 /**
@@ -215,61 +229,6 @@ async function ensureLoggedIn() {
   isLoggedIn = true;
   console.log('Logged in to Bluesky.');
 }
-
-/**
- * Fetch an RSS feed using conditional HTTP requests (ETag / If-Modified-Since).
- * Returns parsed feed data if the feed has new content, or null if unchanged (304).
- * This keeps polling cheap: unchanged feeds return ~200 bytes instead of the full XML.
- */
-async function fetchFeedIfModified(feedUrl) {
-  const cached = feedHttpCache.get(feedUrl);
-  const headers = {};
-  if (cached?.etag) headers['If-None-Match'] = cached.etag;
-  if (cached?.lastModified) headers['If-Modified-Since'] = cached.lastModified;
-
-  const response = await fetchWithTimeout(feedUrl, { headers });
-
-  if (response.status === 304) {
-    return null;
-  }
-
-  // Update cache with new headers
-  feedHttpCache.set(feedUrl, {
-    etag: response.headers.get('etag') || null,
-    lastModified: response.headers.get('last-modified') || null,
-  });
-
-  const xml = await response.text();
-  return parser.parseString(xml);
-}
-
-/**
- * Extract the first image URL from an RSS item's media fields.
- * Checks enclosure, mediaThumbnail, and mediaContent in order.
- */
-function getImageUrlFromItem(item) {
-  if (item.enclosure?.url && item.enclosure.type?.startsWith('image/') && isValidHttpUrl(item.enclosure.url)) {
-    return item.enclosure.url;
-  }
-  const thumbUrl = item.mediaThumbnail?.[0]?.$.url;
-  if (thumbUrl && isValidHttpUrl(thumbUrl)) {
-    return thumbUrl;
-  }
-  const mc = item.mediaContent?.[0];
-  if (mc) {
-    const mcUrl = mc.$.url;
-    if (mcUrl && (mc.$.medium === 'image' || mc.$.type?.startsWith('image/')) && isValidHttpUrl(mcUrl)) {
-      return mcUrl;
-    }
-  }
-  if (item.content) {
-    const match = item.content.match(/<img[^>]+src=["']([^"']+)["']/i);
-    if (match && isValidHttpUrl(match[1])) return match[1];
-  }
-  return null;
-}
-
-export { getImageUrlFromItem, resizeImageForAltText, generateAltText };
 
 /**
  * Scrape OG metadata from a URL. Returns { title, description, imageUrl } or null on failure.
@@ -370,8 +329,10 @@ async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithTimeout
   return '';
 }
 
+export { resizeImageForAltText, generateAltText };
+
 /**
- * Build the embed for a post.
+ * Build the embed for a post from a NormalizedItem.
  * When ALT_TEXT_ENABLED and the item has an image: returns app.bsky.embed.images with AI alt text.
  * Otherwise: returns app.bsky.embed.external (link card with optional thumbnail).
  */
@@ -383,10 +344,10 @@ async function buildEmbedCard(item, url) {
     }
 
     let title = item.title || '';
-    let description = item.contentSnippet || item.summary || '';
-    let imageUrl = getImageUrlFromItem(item);
+    let description = item.description || '';
+    let imageUrl = item.imageUrl || null;
 
-    // Fetch OG metadata if RSS is missing title or description
+    // Fetch OG metadata if the item is missing title or description
     let ogData = null;
     if (!title || !description) {
       ogData = await fetchOgMetadata(url);
@@ -480,36 +441,39 @@ async function buildEmbedCard(item, url) {
   }
 }
 
+function describeFeed(feed) {
+  return feed.url || `${feed.type}://${feed.id}`;
+}
+
 /**
- * Process a single RSS feed and post new entries from the last hour.
- * Uses conditional HTTP requests — if the feed hasn't changed, skips immediately.
+ * Process a single feed via its provider and post new items from the last hour.
  */
 async function processFeed(feed) {
-  const { url: feedUrl, title: feedTitle } = feed;
-
-  const feedData = await fetchFeedIfModified(feedUrl);
-
-  if (!feedData) {
-    return; // Feed unchanged (304) — nothing to do
+  const provider = providers[feed.type];
+  if (!provider) {
+    console.error(`Unknown provider type: ${feed.type}`);
+    return;
   }
 
-  let newPostsFound = false;
+  const items = await provider(feed, feedHttpCache);
+  if (!items) return; // Source unchanged (304 equivalent)
 
-  for (const item of feedData.items) {
-    if (!isPublishedWithinWindow(item.pubDate) || isAlreadyPosted(feedUrl, item.link)) {
+  const feedKey = describeFeed(feed);
+
+  for (const item of items) {
+    if (!item.link || !isPublishedWithinWindow(item.pubDate) || isAlreadyPosted(feedKey, item.link)) {
       continue;
     }
 
     // Record link BEFORE posting to close the race-condition window.
-    // If another cycle checks while we're posting, it will see the link as taken.
-    recordPostedLink(feedUrl, item.link);
+    recordPostedLink(feedKey, item.link);
     await saveLastPostedLinks();
 
     try {
       const embedCard = await buildEmbedCard(item, item.link);
       await rateLimit(true);
 
-      const postText = `${feedTitle ? `${feedTitle}: ` : ''}${item.title}\n\n${item.link}`;
+      const postText = `${feed.title ? `${feed.title}: ` : ''}${item.title}\n\n${item.link}`;
       await agent.post({
         text: postText,
         embed: embedCard || undefined,
@@ -517,25 +481,20 @@ async function processFeed(feed) {
       });
 
       console.log(`Posted: ${postText}`);
-      newPostsFound = true;
     } catch (postError) {
       // Post failed — rollback so the link can be retried next cycle
       console.error(`Failed to post ${item.link}: ${postError.message}`);
-      unrecordPostedLink(feedUrl, item.link);
+      unrecordPostedLink(feedKey, item.link);
       await saveLastPostedLinks();
     }
-  }
-
-  if (!newPostsFound) {
-    console.log(`No new entries for ${feedUrl} in the last hour.`);
   }
 }
 
 /**
- * Main function to process RSS feeds.
+ * Main function to process all feeds.
  * Maintains a persistent session across poll cycles.
  */
-async function postLatestRSSItems(feeds) {
+async function postLatestItems(feeds) {
   try {
     await ensureLoggedIn();
 
@@ -543,7 +502,7 @@ async function postLatestRSSItems(feeds) {
       try {
         await processFeed(feed);
       } catch (error) {
-        console.error(`Error processing feed ${feed.url}: ${error.message}`);
+        console.error(`Error processing feed ${describeFeed(feed)}: ${error.message}`);
       }
     }
   } catch (error) {
@@ -560,12 +519,10 @@ async function postLatestRSSItems(feeds) {
 
 /**
  * Scheduling loop using setTimeout chaining.
- * Guarantees the next cycle only starts after the previous one finishes,
- * eliminating the race condition that setInterval would cause.
  */
 async function runLoop(feeds) {
   while (true) {
-    await postLatestRSSItems(feeds);
+    await postLatestItems(feeds);
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 }
