@@ -10,7 +10,7 @@ A lightweight Node.js bot that monitors news sources and posts new articles to [
 ## Features
 
 - Monitors multiple sources on a configurable polling interval
-- **Pluggable provider architecture** — RSS out of the box, plus the Sveriges Radio JSON API, and trivial to add your own
+- **Pluggable provider architecture** — RSS out of the box, and trivial to add your own source
 - Posts new articles with rich embed cards (title, description, thumbnail)
 - Extracts thumbnail images from RSS media fields (`enclosure`, `media:thumbnail`, `media:content`) or, as a fallback, from `<img>` tags embedded in the feed's `content` HTML — so feeds that don't use dedicated media fields still get images
 - Falls back to Open Graph metadata (`og:image`, `og:title`, `og:description`) when the RSS item itself lacks the information
@@ -64,12 +64,11 @@ Edit `feeds.txt` — one entry per line, no quotes or brackets needed:
 https://example.com/feed.xml | Example News
 https://another.site/rss     | Another Feed
 https://minimal.org/rss
-sr-api://83                  | Ekot
 ```
 
 Lines starting with `#` are comments. The title after `|` is optional — if provided, it prefixes the Bluesky post.
 
-Any bare `http(s)://…` URL is treated as an RSS feed. A `prefix://id` entry routes to the matching provider (e.g. `sr-api` for the Sveriges Radio news API). See [Custom providers](#custom-providers) below.
+Any bare `http(s)://…` URL is treated as an RSS feed. A `prefix://id` entry routes to a custom provider — see [Custom providers](#custom-providers) below.
 
 ### 4. Run
 
@@ -128,12 +127,7 @@ Environment variables (set in `.env`):
 
 ## Custom providers
 
-A **provider** is a small ES module that knows how to fetch news items from a specific source and return them in a normalized shape. The bot comes with two built-in providers:
-
-| Prefix    | Source                          | `feeds.txt` example               |
-|-----------|---------------------------------|-----------------------------------|
-| *(none)*  | RSS / Atom feed (default)       | `https://example.com/feed.xml`    |
-| `sr-api`  | Sveriges Radio news JSON API    | `sr-api://83 \| Ekot`             |
+A **provider** is a small ES module that knows how to fetch news items from a specific source and return them in a normalized shape. The only built-in provider is RSS, used automatically for any bare `http(s)://` entry in `feeds.txt`.
 
 Each provider lives in `providers/<name>.mjs` and exports a single async function. To add a new one, copy [`providers/_template.mjs`](providers/_template.mjs) and register it in `bot.mjs`:
 
@@ -142,9 +136,14 @@ import myProvider from './providers/my-provider.mjs';
 
 const providers = {
   'rss': rssFetcher,
-  'sr-api': srApiFetcher,
   'my-provider': myProvider,   // ← your provider
 };
+```
+
+Entries in `feeds.txt` then use the prefix you registered:
+
+```
+my-provider://some-id | Display Title
 ```
 
 A provider receives the parsed feed config (`{ type, id, title }` or `{ type, url, title }`) and the shared HTTP cache, and returns an array of normalized items:
@@ -213,7 +212,6 @@ Blueskybot/
 ├── bot.test.mjs         # Unit tests (node:test, run with npm test)
 ├── providers/           # Pluggable source providers
 │   ├── rss.mjs          # RSS/Atom (default, no prefix in feeds.txt)
-│   ├── sr-api.mjs       # Sveriges Radio JSON API (sr-api://…)
 │   └── _template.mjs    # Skeleton for writing your own provider
 ├── feeds.txt            # Your feeds (not tracked by git)
 ├── feeds.txt.example    # Feed configuration template
