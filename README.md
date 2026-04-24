@@ -5,11 +5,12 @@
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Bluesky](https://img.shields.io/badge/Bluesky-AT%20Protocol-0085ff?logo=bluesky&logoColor=white)](https://bsky.app/)
 
-A lightweight Node.js bot that monitors RSS feeds and posts new articles to [Bluesky](https://bsky.app) with rich embed cards.
+A lightweight Node.js bot that monitors news sources and posts new articles to [Bluesky](https://bsky.app) with rich embed cards. Supports RSS feeds out of the box, with a pluggable provider system so any source — JSON APIs, scrapers, etc. — can be added by dropping a single file into `providers/`.
 
 ## Features
 
-- Monitors multiple RSS feeds on a configurable polling interval
+- Monitors multiple sources on a configurable polling interval
+- **Pluggable provider architecture** — RSS out of the box, plus the Sveriges Radio JSON API, and trivial to add your own
 - Posts new articles with rich embed cards (title, description, thumbnail)
 - Extracts thumbnail images from RSS media fields (`enclosure`, `media:thumbnail`, `media:content`) or, as a fallback, from `<img>` tags embedded in the feed's `content` HTML — so feeds that don't use dedicated media fields still get images
 - Falls back to Open Graph metadata (`og:image`, `og:title`, `og:description`) when the RSS item itself lacks the information
@@ -51,21 +52,24 @@ BLUESKY_PASSWORD=your_app_password
 
 > **Tip:** Use an [App Password](https://bsky.app/settings/app-passwords) instead of your main password.
 
-### 3. Configure RSS feeds
+### 3. Configure feeds
 
 ```bash
 cp feeds.txt.example feeds.txt
 ```
 
-Edit `feeds.txt` — one feed per line, no quotes or brackets needed:
+Edit `feeds.txt` — one entry per line, no quotes or brackets needed:
 
 ```
 https://example.com/feed.xml | Example News
 https://another.site/rss     | Another Feed
 https://minimal.org/rss
+sr-api://83                  | Ekot
 ```
 
 Lines starting with `#` are comments. The title after `|` is optional — if provided, it prefixes the Bluesky post.
+
+Any bare `http(s)://…` URL is treated as an RSS feed. A `prefix://id` entry routes to the matching provider (e.g. `sr-api` for the Sveriges Radio news API). See [Custom providers](#custom-providers) below.
 
 ### 4. Run
 
@@ -122,6 +126,41 @@ Environment variables (set in `.env`):
 | `ALT_TEXT_LANGUAGE` | `en`     | BCP-47 language code for alt-text (e.g. `sv`, `fi`) |
 | `GEMINI_API_KEY`    | —        | Required when `ALT_TEXT_ENABLED=true`                |
 
+## Custom providers
+
+A **provider** is a small ES module that knows how to fetch news items from a specific source and return them in a normalized shape. The bot comes with two built-in providers:
+
+| Prefix    | Source                          | `feeds.txt` example               |
+|-----------|---------------------------------|-----------------------------------|
+| *(none)*  | RSS / Atom feed (default)       | `https://example.com/feed.xml`    |
+| `sr-api`  | Sveriges Radio news JSON API    | `sr-api://83 \| Ekot`             |
+
+Each provider lives in `providers/<name>.mjs` and exports a single async function. To add a new one, copy [`providers/_template.mjs`](providers/_template.mjs) and register it in `bot.mjs`:
+
+```js
+import myProvider from './providers/my-provider.mjs';
+
+const providers = {
+  'rss': rssFetcher,
+  'sr-api': srApiFetcher,
+  'my-provider': myProvider,   // ← your provider
+};
+```
+
+A provider receives the parsed feed config (`{ type, id, title }` or `{ type, url, title }`) and the shared HTTP cache, and returns an array of normalized items:
+
+```js
+{
+  title: 'Article title',
+  link: 'https://example.com/article',
+  description: 'Short summary, max ~300 chars',
+  imageUrl: 'https://example.com/thumb.jpg',  // or null
+  pubDate: '2026-04-24T12:00:00Z',              // anything new Date() understands
+}
+```
+
+Return `null` instead of an array to signal "nothing changed since last poll" (e.g. for sources that support HTTP 304). The rest of the pipeline — OG-metadata fallback, alt-text, deduplication, posting — is provider-agnostic and handles whatever the provider returns.
+
 ### Alt-text for images (optional, untested)
 
 > **Note:** This feature has not been tested in a live environment yet. It may require adjustments before working reliably in production. Feedback welcome.
@@ -170,9 +209,13 @@ If Gemini is unavailable or rate-limited (HTTP 429), the bot retries up to 3 tim
 
 ```
 Blueskybot/
-├── bot.mjs              # Main application
+├── bot.mjs              # Main application — loop, posting, embeds, dedup
 ├── bot.test.mjs         # Unit tests (node:test, run with npm test)
-├── feeds.txt            # Your RSS feeds (not tracked by git)
+├── providers/           # Pluggable source providers
+│   ├── rss.mjs          # RSS/Atom (default, no prefix in feeds.txt)
+│   ├── sr-api.mjs       # Sveriges Radio JSON API (sr-api://…)
+│   └── _template.mjs    # Skeleton for writing your own provider
+├── feeds.txt            # Your feeds (not tracked by git)
 ├── feeds.txt.example    # Feed configuration template
 ├── Dockerfile           # Container image (Alpine, non-root)
 ├── docker-compose.yml   # Compose orchestration

@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import { getImageUrlFromItem, resizeImageForAltText, generateAltText } from './bot.mjs';
+import { resizeImageForAltText, generateAltText, parseFeedLine } from './bot.mjs';
+import { getImageUrlFromItem } from './providers/rss.mjs';
+import srApiFetcher from './providers/sr-api.mjs';
 
 // ---------------------------------------------------------------------------
 // getImageUrlFromItem
@@ -161,4 +163,149 @@ test('generateAltText truncates response to 300 characters', async () => {
   });
   const result = await generateAltText(Buffer.from('x'), 'image/jpeg', mockFetch);
   assert.equal(result.length, 300);
+});
+
+// ---------------------------------------------------------------------------
+// parseFeedLine (feeds.txt format)
+// ---------------------------------------------------------------------------
+
+test('parseFeedLine: https URL with title produces rss feed', () => {
+  const feed = parseFeedLine('https://example.com/feed.xml | Example News');
+  assert.deepEqual(feed, { type: 'rss', url: 'https://example.com/feed.xml', title: 'Example News' });
+});
+
+test('parseFeedLine: https URL without title produces rss feed with null title', () => {
+  const feed = parseFeedLine('https://example.com/feed.xml');
+  assert.deepEqual(feed, { type: 'rss', url: 'https://example.com/feed.xml', title: null });
+});
+
+test('parseFeedLine: http URL is rss, not http provider type', () => {
+  const feed = parseFeedLine('http://example.com/feed.xml | Old Feed');
+  assert.equal(feed.type, 'rss');
+  assert.equal(feed.url, 'http://example.com/feed.xml');
+});
+
+test('parseFeedLine: sr-api prefix with id and title', () => {
+  const feed = parseFeedLine('sr-api://83 | Ekot');
+  assert.deepEqual(feed, { type: 'sr-api', id: '83', title: 'Ekot' });
+});
+
+test('parseFeedLine: sr-api prefix without title produces null title', () => {
+  const feed = parseFeedLine('sr-api://83');
+  assert.deepEqual(feed, { type: 'sr-api', id: '83', title: null });
+});
+
+test('parseFeedLine: unknown prefix is accepted as custom provider type', () => {
+  const feed = parseFeedLine('custom-src://some-id | Custom');
+  assert.deepEqual(feed, { type: 'custom-src', id: 'some-id', title: 'Custom' });
+});
+
+// ---------------------------------------------------------------------------
+// sr-api provider
+// ---------------------------------------------------------------------------
+
+const sampleSrResponse = {
+  articles: [
+    {
+      title: 'Sample news title',
+      url: 'https://sverigesradio.se/artikel/abc',
+      text: 'Short body text',
+      imageurl: 'https://static-cdn.sr.se/images/x.jpg?preset=api-default-rectangle',
+      publishdateutc: '/Date(1714000000000)/',
+    },
+  ],
+};
+
+test('sr-api: maps articles to normalized items', async () => {
+  const mockFetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => sampleSrResponse,
+  });
+
+  const items = await srApiFetcher({ type: 'sr-api', id: '83', title: 'Ekot' }, new Map(), mockFetch);
+
+  assert.equal(items.length, 1);
+  const [item] = items;
+  assert.equal(item.title, 'Sample news title');
+  assert.equal(item.link, 'https://sverigesradio.se/artikel/abc');
+  assert.equal(item.description, 'Short body text');
+  assert.equal(item.imageUrl, 'https://static-cdn.sr.se/images/x.jpg?preset=api-default-rectangle');
+});
+
+test('sr-api: parses /Date(ms)/ format into a valid ISO date', async () => {
+  const mockFetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => sampleSrResponse,
+  });
+
+  const [item] = await srApiFetcher({ type: 'sr-api', id: '83' }, new Map(), mockFetch);
+  const parsed = new Date(item.pubDate);
+
+  assert.equal(parsed.getTime(), 1714000000000);
+  assert.equal(item.pubDate, new Date(1714000000000).toISOString());
+});
+
+test('sr-api: requests the correct URL with programid and size', async () => {
+  let capturedUrl = null;
+  const mockFetch = async (url) => {
+    capturedUrl = url;
+    return { ok: true, status: 200, json: async () => sampleSrResponse };
+  };
+
+  await srApiFetcher({ type: 'sr-api', id: '83' }, new Map(), mockFetch);
+
+  assert.ok(capturedUrl.includes('programid=83'), 'URL must include programid');
+  assert.ok(capturedUrl.includes('format=json'), 'URL must request JSON format');
+  assert.ok(capturedUrl.includes('size=20'), 'URL must include size=20');
+});
+
+test('sr-api: truncates long description to 300 chars with ellipsis', async () => {
+  const longText = 'a'.repeat(500);
+  const mockFetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      articles: [{
+        title: 't',
+        url: 'https://sverigesradio.se/artikel/1',
+        text: longText,
+        imageurl: null,
+        publishdateutc: '/Date(1714000000000)/',
+      }],
+    }),
+  });
+
+  const [item] = await srApiFetcher({ type: 'sr-api', id: '83' }, new Map(), mockFetch);
+
+  assert.equal(item.description.length, 300);
+  assert.ok(item.description.endsWith('...'), 'truncated text should end with ...');
+});
+
+test('sr-api: invalid imageurl is returned as null', async () => {
+  const mockFetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      articles: [{
+        title: 't',
+        url: 'https://sverigesradio.se/artikel/1',
+        text: 'x',
+        imageurl: 'javascript:alert(1)',
+        publishdateutc: '/Date(1714000000000)/',
+      }],
+    }),
+  });
+
+  const [item] = await srApiFetcher({ type: 'sr-api', id: '83' }, new Map(), mockFetch);
+  assert.equal(item.imageUrl, null);
+});
+
+test('sr-api: throws on non-ok HTTP response', async () => {
+  const mockFetch = async () => ({ ok: false, status: 500 });
+  await assert.rejects(
+    () => srApiFetcher({ type: 'sr-api', id: '83' }, new Map(), mockFetch),
+    /HTTP 500/,
+  );
 });
