@@ -166,6 +166,77 @@ test('generateAltText truncates response to 300 characters', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// generateAltText (OpenAI provider)
+// ---------------------------------------------------------------------------
+
+function withOpenAIProvider(fn) {
+  return async (t) => {
+    const prev = process.env.ALT_TEXT_PROVIDER;
+    process.env.ALT_TEXT_PROVIDER = 'openai';
+    try {
+      await fn(t);
+    } finally {
+      if (prev === undefined) delete process.env.ALT_TEXT_PROVIDER;
+      else process.env.ALT_TEXT_PROVIDER = prev;
+    }
+  };
+}
+
+test('generateAltText (openai) parses choices[0].message.content and trims', withOpenAIProvider(async () => {
+  const capturedRequests = [];
+  const mockFetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    capturedRequests.push({ url, body, headers: options.headers });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: '  A blue circle on yellow background  ' } }],
+      }),
+    };
+  };
+
+  const buf = Buffer.from('fake-image-data');
+  const result = await generateAltText(buf, 'image/jpeg', mockFetch);
+
+  assert.equal(result, 'A blue circle on yellow background');
+  assert.equal(capturedRequests.length, 1);
+  assert.equal(capturedRequests[0].url, 'https://api.openai.com/v1/chat/completions');
+  assert.equal(capturedRequests[0].body.model, 'gpt-4o-mini');
+
+  const content = capturedRequests[0].body.messages[0].content;
+  assert.equal(content[0].type, 'image_url');
+  assert.equal(content[0].image_url.url, `data:image/jpeg;base64,${buf.toString('base64')}`);
+  assert.equal(content[1].type, 'text');
+  assert.ok(content[1].text.includes('alt text'), 'prompt should mention alt text');
+}));
+
+test('generateAltText (openai) returns empty string after 429 retries exhausted', withOpenAIProvider(async () => {
+  let callCount = 0;
+  const mockFetch = async () => {
+    callCount++;
+    return { ok: false, status: 429 };
+  };
+
+  const result = await generateAltText(Buffer.from('x'), 'image/jpeg', mockFetch, 1);
+
+  assert.equal(result, '');
+  assert.equal(callCount, 3, 'should attempt exactly 3 times');
+}));
+
+test('generateAltText (openai) returns empty string on non-2xx response', withOpenAIProvider(async () => {
+  const mockFetch = async () => ({ ok: false, status: 500 });
+  const result = await generateAltText(Buffer.from('x'), 'image/jpeg', mockFetch);
+  assert.equal(result, '');
+}));
+
+test('generateAltText (openai) returns empty string on network error', withOpenAIProvider(async () => {
+  const mockFetch = async () => { throw new Error('network error'); };
+  const result = await generateAltText(Buffer.from('x'), 'image/jpeg', mockFetch);
+  assert.equal(result, '');
+}));
+
+// ---------------------------------------------------------------------------
 // parseFeedLine (feeds.txt format)
 // ---------------------------------------------------------------------------
 
