@@ -19,7 +19,9 @@ const MAX_IMAGE_SIZE = 1_000_000;                 // 1 MB (Bluesky limit)
 
 const ALT_TEXT_ENABLED = process.env.ALT_TEXT_ENABLED === 'true';
 const ALT_TEXT_LANGUAGE = process.env.ALT_TEXT_LANGUAGE || 'en';
+const ALT_TEXT_PROVIDER = process.env.ALT_TEXT_PROVIDER || 'gemini';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const ALT_IMAGE_MAX_DIMENSION = 512;
 
 // Rate limit configuration based on Bluesky's API documentation
@@ -235,7 +237,6 @@ async function ensureLoggedIn() {
  */
 async function fetchOgMetadata(url) {
   try {
-    await rateLimit();
     const response = await fetchWithTimeout(url);
     const html = await response.text();
     const $ = cheerio.load(html);
@@ -273,13 +274,8 @@ async function resizeImageForAltText(imageBuffer, maxDim = ALT_IMAGE_MAX_DIMENSI
  * Ask Gemini 2.5 Flash to describe an image for visually impaired users.
  * Returns a trimmed string ≤ 300 chars, or '' on any error (graceful degradation).
  * Retries up to 3 times with exponential backoff on HTTP 429.
- *
- * @param {Buffer} imageBuffer
- * @param {string} mimeType
- * @param {Function} [fetchFn] - injectable for testing (defaults to fetchWithTimeout)
- * @param {number} [retryDelayMs] - base retry delay in ms; override in tests for speed
  */
-async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithTimeout, retryDelayMs = 1000) {
+async function generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayMs) {
   const base64Data = imageBuffer.toString('base64');
   const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe only what is visible.`;
   const requestBody = {
@@ -329,7 +325,84 @@ async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithTimeout
   return '';
 }
 
-export { resizeImageForAltText, generateAltText };
+/**
+ * Ask OpenAI gpt-4o-mini to describe an image for visually impaired users.
+ * Returns a trimmed string ≤ 300 chars, or '' on any error (graceful degradation).
+ * Retries up to 3 times with exponential backoff on HTTP 429.
+ */
+async function generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayMs) {
+  const base64Data = imageBuffer.toString('base64');
+  const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe only what is visible.`;
+
+  const requestBody = {
+    model: 'gpt-4o-mini',
+    max_tokens: 300,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Data}` } },
+        { type: 'text', text: prompt },
+      ],
+    }],
+  };
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetchFn('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (response.status === 429) {
+        const delayMs = Math.pow(2, attempt + 1) * retryDelayMs;
+        console.warn(`OpenAI rate limit (429). Retry ${attempt + 1}/3 in ${delayMs / 1000}s.`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue;
+      }
+      if (!response.ok) {
+        console.warn(`OpenAI returned HTTP ${response.status}. Skipping alt text.`);
+        return '';
+      }
+
+      const data = await response.json();
+      const text = data?.choices?.[0]?.message?.content;
+      if (!text) {
+        console.warn('OpenAI returned no usable text. Skipping alt text.');
+        return '';
+      }
+      return text.trim().slice(0, 300);
+    } catch (err) {
+      console.warn(`OpenAI alt text error: ${err.message}`);
+      return '';
+    }
+  }
+
+  console.warn('OpenAI rate limit persisted after 3 retries. Skipping alt text.');
+  return '';
+}
+
+/**
+ * Dispatcher: generate alt text using the configured provider.
+ * Returns a trimmed string ≤ 300 chars, or '' on any error (graceful degradation).
+ *
+ * @param {Buffer} imageBuffer
+ * @param {string} mimeType
+ * @param {Function} [fetchFn] - injectable for testing (defaults to fetchWithTimeout)
+ * @param {number} [retryDelayMs] - base retry delay in ms; override in tests for speed
+ */
+export async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithTimeout, retryDelayMs = 1000) {
+  const provider = process.env.ALT_TEXT_PROVIDER || 'gemini';
+  if (provider === 'openai') {
+    return generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayMs);
+  }
+  return generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayMs);
+}
+
+export { resizeImageForAltText };
 
 /**
  * Build the embed for a post from a NormalizedItem.
@@ -347,21 +420,15 @@ async function buildEmbedCard(item, url) {
     let description = item.description || '';
     let imageUrl = item.imageUrl || null;
 
-    // Fetch OG metadata if the item is missing title or description
+    // Fetch OG metadata once if the item is missing any of title/description/image
     let ogData = null;
-    if (!title || !description) {
+    if (!title || !description || !imageUrl) {
       ogData = await fetchOgMetadata(url);
       if (ogData) {
         title = title || ogData.title;
         description = description || ogData.description;
         imageUrl = imageUrl || ogData.imageUrl;
       }
-    }
-
-    // If still no image, try OG just for image (avoid re-fetching if already done)
-    if (!imageUrl && !ogData) {
-      ogData = await fetchOgMetadata(url);
-      imageUrl = ogData?.imageUrl || null;
     }
 
     if (description.length > 300) {
@@ -529,9 +596,15 @@ async function runLoop(feeds) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   console.log('Bot starting up...');
-  if (ALT_TEXT_ENABLED && !GEMINI_API_KEY) {
-    console.error('ALT_TEXT_ENABLED=true but GEMINI_API_KEY is not set. Add it to .env and restart.');
-    process.exit(1);
+  if (ALT_TEXT_ENABLED) {
+    if (ALT_TEXT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
+      console.error('ALT_TEXT_PROVIDER=openai but OPENAI_API_KEY is not set.');
+      process.exit(1);
+    }
+    if (ALT_TEXT_PROVIDER === 'gemini' && !GEMINI_API_KEY) {
+      console.error('ALT_TEXT_ENABLED=true but GEMINI_API_KEY is not set.');
+      process.exit(1);
+    }
   }
   const feeds = await loadFeeds();
   console.log(`Loaded ${feeds.length} feed(s) from ${FEEDS_FILE}.`);

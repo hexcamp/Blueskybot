@@ -14,7 +14,7 @@ A lightweight Node.js bot that monitors news sources and posts new articles to [
 - Posts new articles with rich embed cards (title, description, thumbnail)
 - Extracts thumbnail images from RSS media fields (`enclosure`, `media:thumbnail`, `media:content`) or, as a fallback, from `<img>` tags embedded in the feed's `content` HTML — so feeds that don't use dedicated media fields still get images
 - Falls back to Open Graph metadata (`og:image`, `og:title`, `og:description`) when the RSS item itself lacks the information
-- **Optional AI-generated alt-text** for images via Google Gemini, making posts accessible to visually impaired users
+- **Optional AI-generated alt-text** for images via Google Gemini or OpenAI, making posts accessible to visually impaired users
 - Tracks posted links locally to prevent duplicates
 - Persistent session management (logs in once, re-authenticates on expiry)
 - Respects Bluesky API rate limits with separate read/write tracking
@@ -123,7 +123,9 @@ Environment variables (set in `.env`):
 | `BLUESKY_PASSWORD`  | —        | Your Bluesky password or App Password                |
 | `ALT_TEXT_ENABLED`  | `false`  | Set to `true` to enable AI-generated alt-text        |
 | `ALT_TEXT_LANGUAGE` | `en`     | BCP-47 language code for alt-text (e.g. `sv`, `fi`) |
-| `GEMINI_API_KEY`    | —        | Required when `ALT_TEXT_ENABLED=true`                |
+| `ALT_TEXT_PROVIDER` | `gemini` | Alt-text provider — `gemini` or `openai`             |
+| `GEMINI_API_KEY`    | —        | Required when `ALT_TEXT_PROVIDER=gemini`             |
+| `OPENAI_API_KEY`    | —        | Required when `ALT_TEXT_PROVIDER=openai`             |
 
 ## Custom providers
 
@@ -164,7 +166,7 @@ Return `null` instead of an array to signal "nothing changed since last poll" (e
 
 > **Note:** This feature has not been tested in a live environment yet. It may require adjustments before working reliably in production. Feedback welcome.
 
-The bot can automatically generate image descriptions using Google's Gemini AI, making posts more accessible for visually impaired users. When enabled, posts with images use `app.bsky.embed.images` with AI-written alt-text instead of plain link preview cards. The article URL is always included in the post text, so readers can still open the article.
+The bot can automatically generate image descriptions using Google's Gemini AI **or** OpenAI's `gpt-4o-mini`, making posts more accessible for visually impaired users. Pick the provider with `ALT_TEXT_PROVIDER` (`gemini` is the default). When enabled, posts with images use `app.bsky.embed.images` with AI-written alt-text instead of plain link preview cards. The article URL is always included in the post text, so readers can still open the article.
 
 #### Step 1 — Get a free Gemini API key
 
@@ -179,10 +181,12 @@ The bot can automatically generate image descriptions using Google's Gemini AI, 
 ```env
 ALT_TEXT_ENABLED=true
 ALT_TEXT_LANGUAGE=sv        # BCP-47 code: sv=Swedish, en=English, fi=Finnish, de=German …
-GEMINI_API_KEY=AIzaSyXXXX   # paste your key here
+ALT_TEXT_PROVIDER=gemini    # or "openai"
+GEMINI_API_KEY=AIzaSyXXXX   # required when ALT_TEXT_PROVIDER=gemini
+# OPENAI_API_KEY=sk-XXXX    # required when ALT_TEXT_PROVIDER=openai
 ```
 
-The bot validates the key at startup. If `ALT_TEXT_ENABLED=true` and `GEMINI_API_KEY` is missing, the bot exits immediately with a clear error message.
+The bot validates the key at startup. If `ALT_TEXT_ENABLED=true` and the key for the selected provider is missing, the bot exits immediately with a clear error message.
 
 #### How it works
 
@@ -199,10 +203,13 @@ If Gemini is unavailable or rate-limited (HTTP 429), the bot retries up to 3 tim
 | Problem | Solution |
 |---------|----------|
 | `ALT_TEXT_ENABLED=true but GEMINI_API_KEY is not set` | Add `GEMINI_API_KEY=…` to `.env` and restart |
+| `ALT_TEXT_PROVIDER=openai but OPENAI_API_KEY is not set` | Add `OPENAI_API_KEY=…` to `.env` and restart |
 | Alt-text is in the wrong language | Check `ALT_TEXT_LANGUAGE` — use a BCP-47 code like `sv`, `en`, `fi` |
 | Posts fall back to link cards | The image may exceed 1 MB or be unreachable. Check logs for details |
 | `Gemini returned HTTP 403` | The API key is invalid or restricted — regenerate it in Google AI Studio |
 | `Gemini rate limit persisted after 3 retries` | You've hit the free-tier daily limit (≈250 req/day). The bot continues posting without alt-text |
+| `OpenAI returned HTTP 401` | The OpenAI API key is invalid or revoked — regenerate it in your OpenAI dashboard |
+| `OpenAI returned HTTP 429` / `OpenAI rate limit persisted after 3 retries` | You've hit your OpenAI rate or spend limit. The bot continues posting without alt-text |
 
 ## Project Structure
 
