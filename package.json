@@ -1,7 +1,7 @@
 {
   "name": "blueskybot",
   "version": "1.0.0",
-  "description": "A bot for posting RSS feed updates to Bluesky using Node.js and Docker",
+  "description": "Node.js bot that posts RSS feeds to Bluesky with AI-generated alt text for image accessibility. Supports Google Gemini and OpenAI.",
   "main": "bot.mjs",
   "type": "module",
   "scripts": {
@@ -9,11 +9,21 @@
     "test": "node --test"
   },
   "keywords": [
-    "Bluesky",
-    "RSS",
+    "bluesky",
+    "bluesky-bot",
+    "rss",
+    "rss-to-bluesky",
+    "at-protocol",
+    "atproto",
+    "alt-text",
+    "accessibility",
+    "image-description",
+    "ai-alt-text",
+    "gemini",
+    "openai",
     "bot",
-    "Node.js",
-    "Docker"
+    "nodejs",
+    "docker"
   ],
   "author": "Christian Gillinger",
   "license": "MIT",

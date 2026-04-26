@@ -5,16 +5,16 @@
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Bluesky](https://img.shields.io/badge/Bluesky-AT%20Protocol-0085ff?logo=bluesky&logoColor=white)](https://bsky.app/)
 
-A lightweight Node.js bot that monitors news sources and posts new articles to [Bluesky](https://bsky.app) with rich embed cards. Supports RSS feeds out of the box, with a pluggable provider system so any source — JSON APIs, scrapers, etc. — can be added by dropping a single file into `providers/`.
+A lightweight Node.js bot that monitors RSS feeds and posts new articles to [Bluesky](https://bsky.app). Features rich embed cards, AI-generated alt text for image accessibility via Google Gemini or OpenAI, and a pluggable provider system so any source — JSON APIs, scrapers, etc. — can be added by dropping a single file into `providers/`.
 
 ## Features
 
-- Monitors multiple sources on a configurable polling interval
+- Monitors multiple RSS feeds on a configurable polling interval
+- Posts new articles to Bluesky with rich embed cards (title, description, thumbnail)
+- **AI-generated alt text** for images via Google Gemini or OpenAI — making posts accessible to visually impaired users; configure with a single env var
 - **Pluggable provider architecture** — RSS out of the box, and trivial to add your own source
-- Posts new articles with rich embed cards (title, description, thumbnail)
 - Extracts thumbnail images from RSS media fields (`enclosure`, `media:thumbnail`, `media:content`) or, as a fallback, from `<img>` tags embedded in the feed's `content` HTML — so feeds that don't use dedicated media fields still get images
 - Falls back to Open Graph metadata (`og:image`, `og:title`, `og:description`) when the RSS item itself lacks the information
-- **Optional AI-generated alt-text** for images via Google Gemini or OpenAI, making posts accessible to visually impaired users
 - Tracks posted links locally to prevent duplicates
 - Persistent session management (logs in once, re-authenticates on expiry)
 - Respects Bluesky API rate limits with separate read/write tracking
@@ -162,11 +162,9 @@ A provider receives the parsed feed config (`{ type, id, title }` or `{ type, ur
 
 Return `null` instead of an array to signal "nothing changed since last poll" (e.g. for sources that support HTTP 304). The rest of the pipeline — OG-metadata fallback, alt-text, deduplication, posting — is provider-agnostic and handles whatever the provider returns.
 
-### Alt-text for images (optional, untested)
+### Alt-text for images
 
-> **Note:** This feature has not been tested in a live environment yet. It may require adjustments before working reliably in production. Feedback welcome.
-
-The bot can automatically generate image descriptions using Google's Gemini AI **or** OpenAI's `gpt-4o-mini`, making posts more accessible for visually impaired users. Pick the provider with `ALT_TEXT_PROVIDER` (`gemini` is the default). When enabled, posts with images use `app.bsky.embed.images` with AI-written alt-text instead of plain link preview cards. The article URL is always included in the post text, so readers can still open the article.
+The bot automatically generates image descriptions using Google's Gemini AI **or** OpenAI's `gpt-4o-mini`, making posts accessible to visually impaired users. Pick the provider with `ALT_TEXT_PROVIDER` (`gemini` is the default). When enabled, posts with images use `app.bsky.embed.images` with AI-generated alt text instead of plain link preview cards. The article URL is always included in the post text, so readers can still open the article.
 
 #### Step 1 — Get a free Gemini API key
 
@@ -261,7 +259,7 @@ Blueskybot/
 3. **Deduplicate** against locally stored posted links
 4. **Extract image** from the RSS item: checks `enclosure`, `media:thumbnail`, and `media:content` in order, then falls back to the first `<img src>` found in `item.content` HTML
 5. **Fetch** Open Graph metadata (title, description, `og:image`) from the article URL when the RSS item itself is missing title, description, or image
-6. **Generate alt-text** (if `ALT_TEXT_ENABLED=true`) by downscaling the image and calling Gemini 2.5 Flash
+6. **Generate alt text** (if `ALT_TEXT_ENABLED=true`) by downscaling the image and calling Gemini 2.5 Flash or OpenAI `gpt-4o-mini`
 7. **Upload** image as blob to Bluesky
 8. **Post** to Bluesky — with `app.bsky.embed.images` (alt-text enabled) or `app.bsky.embed.external` (link card)
 9. **Persist** the posted link to avoid duplicates on restart
