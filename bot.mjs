@@ -1,5 +1,5 @@
 // Import necessary modules
-import { BskyAgent } from '@atproto/api';
+import { BskyAgent, RichText } from '@atproto/api';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
@@ -549,8 +549,11 @@ async function processFeed(feed) {
       await rateLimit(true);
 
       const postText = `${feed.title ? `${feed.title}: ` : ''}${item.title}\n\n${item.link}`;
+      const rt = new RichText({ text: postText });
+      await rt.detectFacets(agent);
       await agent.post({
-        text: postText,
+        text: rt.text,
+        facets: rt.facets,
         embed: embedCard || undefined,
         langs: [ALT_TEXT_LANGUAGE],
       });
