@@ -15,6 +15,7 @@ const POLL_INTERVAL_MS = 60 * 1000;              // 1 minute — RSS conditional
 const PUBLICATION_WINDOW_MS = 60 * 60 * 1000;    // 1 hour
 const MAX_TRACKED_LINKS_PER_FEED = 100;
 const FETCH_TIMEOUT_MS = 15_000;
+const ALT_TEXT_FETCH_TIMEOUT_MS = 30_000; // 30s — Gemini vision calls are slow
 const MAX_IMAGE_SIZE = 1_000_000;                 // 1 MB (Bluesky limit)
 
 const ALT_TEXT_ENABLED = process.env.ALT_TEXT_ENABLED === 'true';
@@ -39,6 +40,13 @@ const LAST_POSTED_LINKS_FILE = 'lastPostedLinks.json';
 export function fetchWithTimeout(url, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(timeout));
+}
+
+export function fetchWithAltTextTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ALT_TEXT_FETCH_TIMEOUT_MS);
   return fetch(url, { ...options, signal: controller.signal })
     .finally(() => clearTimeout(timeout));
 }
@@ -391,10 +399,10 @@ async function generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayM
  *
  * @param {Buffer} imageBuffer
  * @param {string} mimeType
- * @param {Function} [fetchFn] - injectable for testing (defaults to fetchWithTimeout)
+ * @param {Function} [fetchFn] - injectable for testing (defaults to fetchWithAltTextTimeout)
  * @param {number} [retryDelayMs] - base retry delay in ms; override in tests for speed
  */
-export async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithTimeout, retryDelayMs = 1000) {
+export async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithAltTextTimeout, retryDelayMs = 1000) {
   const provider = process.env.ALT_TEXT_PROVIDER || 'gemini';
   if (provider === 'openai') {
     return generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayMs);
