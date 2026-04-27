@@ -23,7 +23,21 @@ const ALT_TEXT_LANGUAGE = process.env.ALT_TEXT_LANGUAGE || 'en';
 const ALT_TEXT_PROVIDER = process.env.ALT_TEXT_PROVIDER || 'gemini';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const ALT_IMAGE_MAX_DIMENSION = 512;
+const ALT_IMAGE_MAX_DIMENSION = 256;  // was 512 — halves Gemini token cost
+
+const ALT_TEXT_CONCURRENCY = 3;        // max parallel alt-text API calls
+const ALT_TEXT_MAX_RETRIES = 5;        // max retry cycles before posting without alt text
+const DEFERRED_ITEMS_FILE = 'deferredItems.json';
+
+const SKIP_ALT_TEXT_PATTERNS = [
+  /\/favicon/i,
+  /\/logo[._-]/i,
+  /\/icon[._-]/i,
+  /\/apple-touch-icon/i,
+  /\/site-icon/i,
+  /\/brand[._-]/i,
+];
+const GENERIC_ALT_TEXT = 'Image';  // fallback for skipped images
 
 // Rate limit configuration based on Bluesky's API documentation
 const RATE_LIMIT_API_WINDOW_MS = 5 * 60 * 1000;  // 5 minutes
@@ -122,6 +136,7 @@ const agent = new BskyAgent({ service: 'https://bsky.social' });
 
 // State
 let lastPostedLinks = {};
+let deferredItems = [];  // Array of { item, feedKey, feedTitle, retryCount, deferredAt }
 let apiCallCount = 0;
 let createActionCount = 0;
 let lastApiReset = Date.now();
@@ -130,6 +145,22 @@ let isLoggedIn = false;
 
 // Cache for conditional HTTP requests (ETag / Last-Modified per feed URL)
 const feedHttpCache = new Map();
+
+// In-memory alt-text cache — maps imageUrl -> altText string
+const altTextCache = new Map();
+const ALT_TEXT_CACHE_MAX = 500;
+
+export function getCachedAltText(imageUrl) {
+  return altTextCache.get(imageUrl) || null;
+}
+
+export function setCachedAltText(imageUrl, altText) {
+  if (altTextCache.size >= ALT_TEXT_CACHE_MAX) {
+    const firstKey = altTextCache.keys().next().value;
+    altTextCache.delete(firstKey);
+  }
+  altTextCache.set(imageUrl, altText);
+}
 
 // Load last posted entries from file if it exists
 async function loadLastPostedLinks() {
@@ -144,6 +175,19 @@ async function loadLastPostedLinks() {
 // Save last posted entries to file
 async function saveLastPostedLinks() {
   await fs.writeFile(LAST_POSTED_LINKS_FILE, JSON.stringify(lastPostedLinks, null, 2));
+}
+
+async function loadDeferredItems() {
+  try {
+    const data = await fs.readFile(DEFERRED_ITEMS_FILE, 'utf-8');
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
+}
+
+async function saveDeferredItems() {
+  await fs.writeFile(DEFERRED_ITEMS_FILE, JSON.stringify(deferredItems, null, 2));
 }
 
 /**
@@ -413,6 +457,83 @@ export async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWith
 export { resizeImageForAltText };
 
 /**
+ * Returns true if the image URL matches a known non-content pattern
+ * (favicon, logo, icon, etc.) that doesn't benefit from AI description.
+ */
+export function shouldSkipAltText(imageUrl) {
+  if (!imageUrl) return false;
+  return SKIP_ALT_TEXT_PATTERNS.some(pattern => pattern.test(imageUrl));
+}
+
+async function prefetchAltText(imageUrl) {
+  if (!imageUrl || !isValidHttpUrl(imageUrl)) return null;
+
+  try {
+    if (shouldSkipAltText(imageUrl)) {
+      console.log(`Skipping alt-text API for non-content image: ${imageUrl}`);
+      const imageResponse = await fetchWithTimeout(imageUrl);
+      const contentType = imageResponse.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
+      const imageData = Buffer.from(await imageResponse.arrayBuffer());
+      if (imageData.length > MAX_IMAGE_SIZE) return null;
+
+      let aspectRatio;
+      try {
+        const meta = await sharp(imageData).metadata();
+        if (meta.width && meta.height) aspectRatio = { width: meta.width, height: meta.height };
+      } catch {}
+
+      return { altText: GENERIC_ALT_TEXT, imageData, contentType, aspectRatio };
+    }
+
+    const cached = getCachedAltText(imageUrl);
+    if (cached) {
+      console.log(`Alt-text cache hit for ${imageUrl}`);
+      const imageResponse = await fetchWithTimeout(imageUrl);
+      const contentType = imageResponse.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
+      const imageData = Buffer.from(await imageResponse.arrayBuffer());
+      if (imageData.length > MAX_IMAGE_SIZE) return null;
+
+      let aspectRatio;
+      try {
+        const meta = await sharp(imageData).metadata();
+        if (meta.width && meta.height) aspectRatio = { width: meta.width, height: meta.height };
+      } catch {}
+
+      return { altText: cached, imageData, contentType, aspectRatio };
+    }
+
+    const imageResponse = await fetchWithTimeout(imageUrl);
+    const contentType = imageResponse.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
+    const imageData = Buffer.from(await imageResponse.arrayBuffer());
+
+    if (imageData.length > MAX_IMAGE_SIZE) {
+      console.log(`Image too large (${imageData.length} bytes), cannot use for images embed.`);
+      return null;
+    }
+
+    let aspectRatio;
+    try {
+      const meta = await sharp(imageData).metadata();
+      if (meta.width && meta.height) aspectRatio = { width: meta.width, height: meta.height };
+    } catch (metaErr) {
+      console.warn(`Could not read image dimensions: ${metaErr.message}`);
+    }
+
+    const { buffer: resizedBuffer, mimeType: resizedMime } = await resizeImageForAltText(imageData);
+    const altText = await generateAltText(resizedBuffer, resizedMime);
+
+    if (altText) {
+      setCachedAltText(imageUrl, altText);
+    }
+
+    return { altText, imageData, contentType, aspectRatio };
+  } catch (err) {
+    console.warn(`prefetchAltText failed for ${imageUrl}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Build the embed for a post from a NormalizedItem.
  * When ALT_TEXT_ENABLED and the item has an image: returns app.bsky.embed.images with AI alt text.
  * Otherwise: returns app.bsky.embed.external (link card with optional thumbnail).
@@ -531,23 +652,90 @@ async function processFeed(feed) {
   }
 
   const items = await provider(feed, feedHttpCache);
-  if (!items) return; // Source unchanged (304 equivalent)
+  if (!items) return;
 
   const feedKey = describeFeed(feed);
 
-  for (const item of items) {
-    if (!item.link || !isPublishedWithinWindow(item.pubDate) || isAlreadyPosted(feedKey, item.link)) {
-      continue;
-    }
+  const postable = items.filter(item =>
+    item.link &&
+    isPublishedWithinWindow(item.pubDate) &&
+    !isAlreadyPosted(feedKey, item.link)
+  );
 
-    // Record link BEFORE posting to close the race-condition window.
+  if (postable.length === 0) return;
+
+  // --- Phase 1: Parallel alt-text prefetch (bounded concurrency) ---
+  const altTextResults = new Map(); // link -> prefetch result
+
+  if (ALT_TEXT_ENABLED) {
+    for (let i = 0; i < postable.length; i += ALT_TEXT_CONCURRENCY) {
+      const batch = postable.slice(i, i + ALT_TEXT_CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async item => {
+          let resolvedImageUrl = item.imageUrl || null;
+          if (!resolvedImageUrl) {
+            const og = await fetchOgMetadata(item.link);
+            resolvedImageUrl = og?.imageUrl || null;
+            item._ogData = og;
+          }
+          const result = await prefetchAltText(resolvedImageUrl);
+          return { link: item.link, result };
+        })
+      );
+      for (const { link, result } of results) {
+        altTextResults.set(link, result);
+      }
+    }
+  }
+
+  // --- Phase 2: Post sequentially, deferring on alt-text failure ---
+  for (const item of postable) {
     recordPostedLink(feedKey, item.link);
     await saveLastPostedLinks();
 
     try {
-      const embedCard = await buildEmbedCard(item, item.link);
-      await rateLimit(true);
+      let embedCard;
 
+      if (ALT_TEXT_ENABLED) {
+        const prefetched = altTextResults.get(item.link);
+
+        if (prefetched && prefetched.altText) {
+          // Success — build images embed with prefetched data
+          await rateLimit(true);
+          const { data: { blob } } = await agent.uploadBlob(prefetched.imageData, prefetched.contentType);
+          const imageEntry = { alt: prefetched.altText, image: blob };
+          if (prefetched.aspectRatio) imageEntry.aspectRatio = prefetched.aspectRatio;
+          embedCard = { $type: 'app.bsky.embed.images', images: [imageEntry] };
+        } else if (prefetched && !prefetched.altText) {
+          // Image fetched OK but alt text generation failed — DEFER
+          console.warn(`Alt text failed for ${item.link}, deferring to retry queue.`);
+          unrecordPostedLink(feedKey, item.link);
+          await saveLastPostedLinks();
+          deferredItems.push({
+            item: { ...item, _ogData: undefined },
+            feedKey,
+            feedTitle: feed.title,
+            retryCount: 0,
+            deferredAt: new Date().toISOString(),
+          });
+          await saveDeferredItems();
+          continue;
+        } else {
+          // No image at all — post as external link card (no alt text needed)
+          const ogData = item._ogData || await fetchOgMetadata(item.link);
+          const title = item.title || ogData?.title || 'Link';
+          let description = item.description || ogData?.description || '';
+          if (description.length > 300) description = description.slice(0, 297) + '...';
+          embedCard = {
+            $type: 'app.bsky.embed.external',
+            external: { uri: item.link, title, description },
+          };
+        }
+      } else {
+        embedCard = await buildEmbedCard(item, item.link);
+      }
+
+      await rateLimit(true);
       const postText = `${feed.title ? `${feed.title}: ` : ''}${item.title}\n\n${item.link}`;
       const rt = new RichText({ text: postText });
       await rt.detectFacets(agent);
@@ -557,15 +745,102 @@ async function processFeed(feed) {
         embed: embedCard || undefined,
         langs: [ALT_TEXT_LANGUAGE],
       });
-
       console.log(`Posted: ${postText}`);
     } catch (postError) {
-      // Post failed — rollback so the link can be retried next cycle
       console.error(`Failed to post ${item.link}: ${postError.message}`);
       unrecordPostedLink(feedKey, item.link);
       await saveLastPostedLinks();
     }
   }
+}
+
+async function processDeferredItems() {
+  if (deferredItems.length === 0) return;
+
+  console.log(`Processing ${deferredItems.length} deferred item(s)...`);
+  const stillDeferred = [];
+
+  for (const entry of deferredItems) {
+    const { item, feedKey, feedTitle, retryCount } = entry;
+
+    if (isAlreadyPosted(feedKey, item.link)) continue;
+
+    const imageUrl = item.imageUrl || null;
+    const prefetched = await prefetchAltText(imageUrl);
+
+    if (prefetched && prefetched.altText) {
+      recordPostedLink(feedKey, item.link);
+      await saveLastPostedLinks();
+
+      try {
+        await rateLimit(true);
+        const { data: { blob } } = await agent.uploadBlob(prefetched.imageData, prefetched.contentType);
+        const imageEntry = { alt: prefetched.altText, image: blob };
+        if (prefetched.aspectRatio) imageEntry.aspectRatio = prefetched.aspectRatio;
+
+        await rateLimit(true);
+        const postText = `${feedTitle ? `${feedTitle}: ` : ''}${item.title}\n\n${item.link}`;
+        const rt = new RichText({ text: postText });
+        await rt.detectFacets(agent);
+        await agent.post({
+          text: rt.text,
+          facets: rt.facets,
+          embed: { $type: 'app.bsky.embed.images', images: [imageEntry] },
+          langs: [ALT_TEXT_LANGUAGE],
+        });
+        console.log(`Posted deferred item: ${postText}`);
+      } catch (err) {
+        console.error(`Failed to post deferred ${item.link}: ${err.message}`);
+        unrecordPostedLink(feedKey, item.link);
+        await saveLastPostedLinks();
+        stillDeferred.push({ ...entry, retryCount: retryCount + 1 });
+      }
+    } else if (retryCount + 1 >= ALT_TEXT_MAX_RETRIES) {
+      console.warn(`Max retries (${ALT_TEXT_MAX_RETRIES}) exhausted for ${item.link}. Posting without alt text.`);
+      recordPostedLink(feedKey, item.link);
+      await saveLastPostedLinks();
+
+      try {
+        let embedCard;
+        if (prefetched) {
+          await rateLimit(true);
+          const { data: { blob } } = await agent.uploadBlob(prefetched.imageData, prefetched.contentType);
+          const imageEntry = { alt: '', image: blob };
+          if (prefetched.aspectRatio) imageEntry.aspectRatio = prefetched.aspectRatio;
+          embedCard = { $type: 'app.bsky.embed.images', images: [imageEntry] };
+        } else {
+          let description = item.description || '';
+          if (description.length > 300) description = description.slice(0, 297) + '...';
+          embedCard = {
+            $type: 'app.bsky.embed.external',
+            external: { uri: item.link, title: item.title || 'Link', description },
+          };
+        }
+
+        await rateLimit(true);
+        const postText = `${feedTitle ? `${feedTitle}: ` : ''}${item.title}\n\n${item.link}`;
+        const rt = new RichText({ text: postText });
+        await rt.detectFacets(agent);
+        await agent.post({
+          text: rt.text,
+          facets: rt.facets,
+          embed: embedCard || undefined,
+          langs: [ALT_TEXT_LANGUAGE],
+        });
+        console.log(`Posted (no alt text, retries exhausted): ${postText}`);
+      } catch (err) {
+        console.error(`Failed to post exhausted-retry ${item.link}: ${err.message}`);
+        unrecordPostedLink(feedKey, item.link);
+        await saveLastPostedLinks();
+      }
+    } else {
+      console.log(`Alt text still failing for ${item.link} (retry ${retryCount + 1}/${ALT_TEXT_MAX_RETRIES}). Deferring again.`);
+      stillDeferred.push({ ...entry, retryCount: retryCount + 1 });
+    }
+  }
+
+  deferredItems = stillDeferred;
+  await saveDeferredItems();
 }
 
 /**
@@ -575,6 +850,9 @@ async function processFeed(feed) {
 async function postLatestItems(feeds) {
   try {
     await ensureLoggedIn();
+
+    // Process deferred items first (retry alt text)
+    await processDeferredItems();
 
     for (const feed of feeds) {
       try {
@@ -620,5 +898,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const feeds = await loadFeeds();
   console.log(`Loaded ${feeds.length} feed(s) from ${FEEDS_FILE}.`);
   lastPostedLinks = await loadLastPostedLinks();
+  deferredItems = await loadDeferredItems();
+  if (deferredItems.length > 0) {
+    console.log(`${deferredItems.length} deferred item(s) loaded from previous run.`);
+  }
   runLoop(feeds);
 }

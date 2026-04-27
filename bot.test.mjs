@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import { resizeImageForAltText, generateAltText, parseFeedLine } from './bot.mjs';
+import { resizeImageForAltText, generateAltText, parseFeedLine, shouldSkipAltText, getCachedAltText, setCachedAltText } from './bot.mjs';
 import { getImageUrlFromItem } from './providers/rss.mjs';
 import srApiFetcher from './providers/sr-api.mjs';
 
@@ -380,3 +380,76 @@ test('sr-api: throws on non-ok HTTP response', async () => {
     /HTTP 500/,
   );
 });
+
+// ---------------------------------------------------------------------------
+// shouldSkipAltText
+// ---------------------------------------------------------------------------
+
+test('shouldSkipAltText returns true for favicon URLs', () => {
+  assert.equal(shouldSkipAltText('https://example.com/favicon.ico'), true);
+  assert.equal(shouldSkipAltText('https://example.com/assets/favicon-32x32.png'), true);
+});
+
+test('shouldSkipAltText returns true for logo URLs', () => {
+  assert.equal(shouldSkipAltText('https://example.com/logo-white.svg'), true);
+  assert.equal(shouldSkipAltText('https://example.com/logo.png'), true);
+});
+
+test('shouldSkipAltText returns true for icon URLs', () => {
+  assert.equal(shouldSkipAltText('https://example.com/icon_small.png'), true);
+  assert.equal(shouldSkipAltText('https://example.com/apple-touch-icon.png'), true);
+  assert.equal(shouldSkipAltText('https://example.com/site-icon.jpg'), true);
+});
+
+test('shouldSkipAltText returns true for brand URLs', () => {
+  assert.equal(shouldSkipAltText('https://example.com/brand-image.png'), true);
+  assert.equal(shouldSkipAltText('https://example.com/brand.logo.svg'), true);
+});
+
+test('shouldSkipAltText returns false for regular content image URLs', () => {
+  assert.equal(shouldSkipAltText('https://example.com/photo.jpg'), false);
+  assert.equal(shouldSkipAltText('https://example.com/article-hero.png'), false);
+  assert.equal(shouldSkipAltText('https://example.com/images/story-2024.jpg'), false);
+});
+
+test('shouldSkipAltText returns false for null and undefined', () => {
+  assert.equal(shouldSkipAltText(null), false);
+  assert.equal(shouldSkipAltText(undefined), false);
+  assert.equal(shouldSkipAltText(''), false);
+});
+
+// ---------------------------------------------------------------------------
+// Alt-text cache behavior
+// ---------------------------------------------------------------------------
+
+test('getCachedAltText returns null for an uncached URL', () => {
+  const url = `https://example.com/never-cached-${Date.now()}.jpg`;
+  assert.equal(getCachedAltText(url), null);
+});
+
+test('setCachedAltText and getCachedAltText round-trip', () => {
+  const url = `https://example.com/cache-test-${Date.now()}.jpg`;
+  setCachedAltText(url, 'A scenic mountain landscape');
+  assert.equal(getCachedAltText(url), 'A scenic mountain landscape');
+});
+
+test('setCachedAltText overwrites an existing entry for the same URL', () => {
+  const url = `https://example.com/overwrite-${Date.now()}.jpg`;
+  setCachedAltText(url, 'First description');
+  setCachedAltText(url, 'Updated description');
+  assert.equal(getCachedAltText(url), 'Updated description');
+});
+
+// ---------------------------------------------------------------------------
+// Deferred items (integration stubs — require full agent mocking)
+// ---------------------------------------------------------------------------
+
+test.todo('prefetchAltText returns cached result on second call for same URL');
+
+test.todo('item is deferred when alt text returns empty string');
+
+test.todo('deferred item posts on retry when alt text succeeds');
+
+test.todo('deferred item posts without alt text after ALT_TEXT_MAX_RETRIES');
+
+test.todo('parallel prefetch processes in batches of ALT_TEXT_CONCURRENCY');
