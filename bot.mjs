@@ -327,9 +327,12 @@ async function resizeImageForAltText(imageBuffer, maxDim = ALT_IMAGE_MAX_DIMENSI
  * Returns a trimmed string ≤ 300 chars, or '' on any error (graceful degradation).
  * Retries up to 3 times with exponential backoff on HTTP 429.
  */
-async function generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayMs) {
+async function generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayMs, context = '') {
   const base64Data = imageBuffer.toString('base64');
-  const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe what is visible. Only name a person if you are highly confident in the identification. If unsure, describe their appearance instead. Never guess.`;
+  let prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe what is visible. Only name a person if you are highly confident in the identification. If unsure, describe their appearance instead. Never guess.`;
+  if (context) {
+    prompt += ` Context from the article: "${context}". Use this to identify people or events, but only describe what is actually visible in the image.`;
+  }
   const requestBody = {
     contents: [{
       parts: [
@@ -382,9 +385,12 @@ async function generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayM
  * Returns a trimmed string ≤ 300 chars, or '' on any error (graceful degradation).
  * Retries up to 3 times with exponential backoff on HTTP 429.
  */
-async function generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayMs) {
+async function generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayMs, context = '') {
   const base64Data = imageBuffer.toString('base64');
-  const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe what is visible. Only name a person if you are highly confident in the identification. If unsure, describe their appearance instead. Never guess.`;
+  let prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe what is visible. Only name a person if you are highly confident in the identification. If unsure, describe their appearance instead. Never guess.`;
+  if (context) {
+    prompt += ` Context from the article: "${context}". Use this to identify people or events, but only describe what is actually visible in the image.`;
+  }
 
   const requestBody = {
     model: 'gpt-4o-mini',
@@ -446,12 +452,12 @@ async function generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayM
  * @param {Function} [fetchFn] - injectable for testing (defaults to fetchWithAltTextTimeout)
  * @param {number} [retryDelayMs] - base retry delay in ms; override in tests for speed
  */
-export async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithAltTextTimeout, retryDelayMs = 1000) {
+export async function generateAltText(imageBuffer, mimeType, fetchFn = fetchWithAltTextTimeout, retryDelayMs = 1000, context = '') {
   const provider = process.env.ALT_TEXT_PROVIDER || 'gemini';
   if (provider === 'openai') {
-    return generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayMs);
+    return generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayMs, context);
   }
-  return generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayMs);
+  return generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayMs, context);
 }
 
 export { resizeImageForAltText };
@@ -465,7 +471,7 @@ export function shouldSkipAltText(imageUrl) {
   return SKIP_ALT_TEXT_PATTERNS.some(pattern => pattern.test(imageUrl));
 }
 
-async function prefetchAltText(imageUrl) {
+async function prefetchAltText(imageUrl, context = '') {
   if (!imageUrl || !isValidHttpUrl(imageUrl)) return null;
 
   try {
@@ -520,7 +526,7 @@ async function prefetchAltText(imageUrl) {
     }
 
     const { buffer: resizedBuffer, mimeType: resizedMime } = await resizeImageForAltText(imageData);
-    const altText = await generateAltText(resizedBuffer, resizedMime);
+    const altText = await generateAltText(resizedBuffer, resizedMime, undefined, undefined, context);
 
     if (altText) {
       setCachedAltText(imageUrl, altText);
@@ -583,7 +589,8 @@ async function buildEmbedCard(item, url) {
           }
 
           const { buffer: resizedBuffer, mimeType: resizedMime } = await resizeImageForAltText(imageData);
-          const altText = await generateAltText(resizedBuffer, resizedMime);
+          const altTextContext = [item.title, item.description].filter(Boolean).join(' — ');
+          const altText = await generateAltText(resizedBuffer, resizedMime, undefined, undefined, altTextContext);
 
           await rateLimit(true);
           const { data: { blob } } = await agent.uploadBlob(imageData, contentType);
@@ -678,7 +685,8 @@ async function processFeed(feed) {
             resolvedImageUrl = og?.imageUrl || null;
             item._ogData = og;
           }
-          const result = await prefetchAltText(resolvedImageUrl);
+          const altTextContext = [item.title, item.description].filter(Boolean).join(' — ');
+          const result = await prefetchAltText(resolvedImageUrl, altTextContext);
           return { link: item.link, result };
         })
       );
@@ -766,7 +774,8 @@ async function processDeferredItems() {
     if (isAlreadyPosted(feedKey, item.link)) continue;
 
     const imageUrl = item.imageUrl || null;
-    const prefetched = await prefetchAltText(imageUrl);
+    const altTextContext = [item.title, item.description].filter(Boolean).join(' — ');
+    const prefetched = await prefetchAltText(imageUrl, altTextContext);
 
     if (prefetched && prefetched.altText) {
       recordPostedLink(feedKey, item.link);

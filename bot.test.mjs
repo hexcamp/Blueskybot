@@ -152,6 +152,41 @@ test('generateAltText returns empty string when response has no text', async () 
   assert.equal(result, '');
 });
 
+test('generateAltText includes context in Gemini prompt when provided', async () => {
+  const capturedRequests = [];
+  const mockFetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    capturedRequests.push({ url, body });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: 'A person on stage' }] } }],
+      }),
+    };
+  };
+
+  const buf = Buffer.from('fake-image-data');
+  await generateAltText(buf, 'image/jpeg', mockFetch, 1000, 'Felicia om dödshoten');
+
+  const prompt = capturedRequests[0].body.contents[0].parts[1].text;
+  assert.ok(prompt.includes('Felicia om dödshoten'), 'prompt should include the context');
+  assert.ok(prompt.includes('alt text'), 'prompt should still mention alt text');
+});
+
+test('generateAltText works without context (backward compatible)', async () => {
+  const mockFetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      candidates: [{ content: { parts: [{ text: 'A red square' }] } }],
+    }),
+  });
+
+  const result = await generateAltText(Buffer.from('x'), 'image/jpeg', mockFetch);
+  assert.equal(result, 'A red square');
+});
+
 test('generateAltText truncates response to 300 characters', async () => {
   const longText = 'a'.repeat(400);
   const mockFetch = async () => ({
