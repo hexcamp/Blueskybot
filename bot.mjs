@@ -285,7 +285,7 @@ async function resizeImageForAltText(imageBuffer, maxDim = ALT_IMAGE_MAX_DIMENSI
  */
 async function generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayMs) {
   const base64Data = imageBuffer.toString('base64');
-  const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe what is visible. If you recognize any public figures, name them.`;
+  const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe what is visible. Only name a person if you are highly confident in the identification. If unsure, describe their appearance instead. Never guess.`;
   const requestBody = {
     contents: [{
       parts: [
@@ -340,7 +340,7 @@ async function generateAltTextGemini(imageBuffer, mimeType, fetchFn, retryDelayM
  */
 async function generateAltTextOpenAI(imageBuffer, mimeType, fetchFn, retryDelayMs) {
   const base64Data = imageBuffer.toString('base64');
-  const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe what is visible. If you recognize any public figures, name them.`;
+  const prompt = `Describe this image as alt text for visually impaired users. Write in ${ALT_TEXT_LANGUAGE}. Be concise, max 250 characters. Describe what is visible. Only name a person if you are highly confident in the identification. If unsure, describe their appearance instead. Never guess.`;
 
   const requestBody = {
     model: 'gpt-4o-mini',
