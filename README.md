@@ -309,6 +309,7 @@ Blueskybot/
 | Thumbnails missing on some posts | The bot tries RSS media fields, content HTML `<img>` tags, and `og:image` in order. If all fail, the source site may have no accessible image or the image exceeds 1 MB. |
 | `FETCH_TIMEOUT` errors | The target site is slow or unreachable. The post will still be created without a thumbnail. |
 | Container unhealthy | Check logs with `docker compose logs` — likely a credential or network issue. |
+| Commented-out feed still posts | `feeds.txt` is baked into the image at build time. Editing it on the host has no effect until you rebuild: `docker compose build && docker compose up -d`. Verify with `docker logs blueskybot --tail 20`. |
 
 ## Contributing
 
