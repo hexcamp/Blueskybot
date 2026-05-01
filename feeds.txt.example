@@ -30,3 +30,6 @@ https://example.com/rss-feed-2.xml | Example Feed 2
 
 # sr-api://83   | Ekot
 # sr-api://2795 | Radiosporten
+
+# Disabled feed (prefix the line with # to temporarily exclude it):
+# https://example.com/rss-feed-3.xml | Disabled Feed
