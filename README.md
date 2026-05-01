@@ -74,12 +74,16 @@ cp feeds.txt.example feeds.txt
 Edit `feeds.txt` — one entry per line, no quotes or brackets needed:
 
 ```
+# This is a comment — the line is ignored
 https://example.com/feed.xml | Example News
 https://another.site/rss     | Another Feed
 https://minimal.org/rss
+
+# Disabled feed:
+# https://example.com/other-feed.rss | Other Source
 ```
 
-Lines starting with `#` are comments. The title after `|` is optional — if provided, it prefixes the Bluesky post.
+Lines starting with `#` are comments and empty lines are ignored. The title after `|` is optional — if provided, it prefixes the Bluesky post.
 
 Any bare `http(s)://…` URL is treated as an RSS feed. A `prefix://id` entry routes to a custom provider — see [Custom providers](#custom-providers) below.
 
@@ -105,6 +109,16 @@ docker compose up -d --build
 docker compose logs -f        # follow logs
 docker compose down           # stop
 ```
+
+> **Note:** `feeds.txt` is baked into the Docker image at build time — it is **not** mounted as a volume. If you edit `feeds.txt` on the host after the initial build, you must rebuild the image for the change to take effect:
+> ```bash
+> docker compose build && docker compose up -d
+> ```
+> After rebuilding, verify that the correct feeds were loaded:
+> ```bash
+> docker logs blueskybot --tail 20
+> # Expected: Loaded N feed(s) from feeds.txt.
+> ```
 
 ### Using Docker directly
 
