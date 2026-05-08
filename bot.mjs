@@ -891,6 +891,10 @@ async function runLoop(feeds) {
   while (true) {
     console.log('Running...')
     await postLatestItems(feeds);
+    if (process.argv[2] == '--once') {
+      console.log('Exiting after running once.');
+      process.exit(0);
+    }
     console.log('Pausing for', POLL_INTERVAL_MS / 1000, 'seconds...');
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
   }
