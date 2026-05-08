@@ -1,6 +1,6 @@
 // Import necessary modules
-import { BskyAgent, RichText } from '@atproto/api';
-import fetch from 'node-fetch';
+import { AtpAgent, RichText } from '@atproto/api';
+// import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import * as cheerio from 'cheerio';
@@ -11,8 +11,8 @@ import { fileURLToPath } from 'url';
 dotenv.config();
 
 // Configuration constants
-const POLL_INTERVAL_MS = 60 * 1000;              // 1 minute — RSS conditional requests make this cheap
-const PUBLICATION_WINDOW_MS = 60 * 60 * 1000;    // 1 hour
+const POLL_INTERVAL_MS = 5 * 60 * 1000;              // 5 minutes — RSS conditional requests make this cheap
+const PUBLICATION_WINDOW_MS = 6 * 60 * 60 * 1000;    // 6 hours
 const MAX_TRACKED_LINKS_PER_FEED = 100;
 const FETCH_TIMEOUT_MS = 15_000;
 const ALT_TEXT_FETCH_TIMEOUT_MS = 30_000; // 30s — Gemini vision calls are slow
@@ -132,7 +132,9 @@ export async function loadFeeds() {
 }
 
 // Initialize Bluesky agent with service URL
-const agent = new BskyAgent({ service: 'https://bsky.social' });
+const serviceURL = process.env['SERVICE_URL'] || 'https://bsky.social';
+console.log('Jim serviceURL', serviceURL);
+const agent = new AtpAgent({ service: serviceURL });
 
 // State
 let lastPostedLinks = {};
@@ -887,7 +889,9 @@ async function postLatestItems(feeds) {
  */
 async function runLoop(feeds) {
   while (true) {
+    console.log('Running...')
     await postLatestItems(feeds);
+    console.log('Pausing for', POLL_INTERVAL_MS / 1000, 'seconds...');
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 }

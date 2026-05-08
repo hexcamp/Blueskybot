@@ -6,3 +6,4 @@ package-lock.json
 *.log
 lastPostedLinks.json
 deferredItems.json
+feeds.txt

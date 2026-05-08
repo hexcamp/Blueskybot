@@ -46,7 +46,9 @@ async function fetchFeedIfModified(feedUrl, httpCache) {
   if (cached?.etag) headers['If-None-Match'] = cached.etag;
   if (cached?.lastModified) headers['If-Modified-Since'] = cached.lastModified;
 
+  console.log('RSS Fetch', feedUrl);
   const response = await fetchWithTimeout(feedUrl, { headers });
+  console.log('RSS Fetch response status', response.status);
 
   if (response.status === 304) {
     return null;
