@@ -1,4 +1,4 @@
-FROM node:18-alpine
+FROM node:24-alpine
 
 # Run as non-root user for security
 RUN addgroup -S botuser && adduser -S botuser -G botuser
