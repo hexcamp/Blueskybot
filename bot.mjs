@@ -133,7 +133,6 @@ export async function loadFeeds() {
 
 // Initialize Bluesky agent with service URL
 const serviceURL = process.env['SERVICE_URL'] || 'https://bsky.social';
-console.log('Jim serviceURL', serviceURL);
 const agent = new AtpAgent({ service: serviceURL });
 
 // State
