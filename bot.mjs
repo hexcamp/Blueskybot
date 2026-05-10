@@ -745,7 +745,7 @@ async function processFeed(feed) {
       }
 
       await rateLimit(true);
-      const postText = `${feed.title ? `${feed.title}: ` : ''}${item.title}\n\n${item.link}`;
+      const postText = `${feed.title ? `${feed.title}: ` : ''}${item.title}`;
       const rt = new RichText({ text: postText });
       await rt.detectFacets(agent);
       await agent.post({
@@ -789,7 +789,7 @@ async function processDeferredItems() {
         if (prefetched.aspectRatio) imageEntry.aspectRatio = prefetched.aspectRatio;
 
         await rateLimit(true);
-        const postText = `${feedTitle ? `${feedTitle}: ` : ''}${item.title}\n\n${item.link}`;
+        const postText = `${feedTitle ? `${feedTitle}: ` : ''}${item.title}`;
         const rt = new RichText({ text: postText });
         await rt.detectFacets(agent);
         await agent.post({
